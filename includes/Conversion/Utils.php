@@ -5,6 +5,7 @@ namespace Flow\Conversion;
 use DOMDocument;
 use DOMElement;
 use DOMNode;
+use ExtensionRegistry;
 use FauxResponse;
 use Flow\Container;
 use Flow\Exception\FlowException;
@@ -60,22 +61,50 @@ abstract class Utils {
 			$from = 'wikitext';
 		}
 
-		if ( $from === 'wikitext' || $from === 'html' ) {
-			if ( $to === 'wikitext' || $to === 'html' ) {
-				if ( self::isParsoidConfigured() ) {
-					return self::parsoid( $from, $to, $content, $title );
-				} else {
-					return self::parser( $from, $to, $content, $title );
-				}
-			} else {
-				throw new WikitextException( "Conversion from '$from' to '$to' was requested, " .
-					"but this is not supported." );
-			}
-		} elseif ( $from === 'topic-title-wikitext' && ( $to === 'topic-title-html' || $to === 'topic-title-plaintext' ) ) {
+		if ( $from == 'wikitext' && $to == 'html' ) {
+			return self::wikitextToHTML( $content, $title );
+		} elseif ( $from == 'html' && $to == 'wikitext' ) {
+			return self::htmlToWikitext( $content, $title );
+		} elseif ( $from === 'topic-title-wikitext' &&
+			( $to === 'topic-title-html' || $to === 'topic-title-plaintext' ) ) {
 			// FIXME: links need to be proceed by findVariantLinks or equivant function
 			return self::getLanguageConverter()->convert( self::commentParser( $from, $to, $content ) );
 		} else {
 			return self::commentParser( $from, $to, $content );
+		}
+	}
+
+	/**
+	 * @param string $wikitext
+	 * @param Title $title
+	 *
+	 * @return string The converted wikitext to HTML
+	 */
+	private static function wikitextToHTML( string $wikitext, Title $title ) {
+		$parserOptions = ParserOptions::newFromAnon();
+		$parserOptions->setRenderReason( __METHOD__ );
+
+		$parserFactory = MediaWikiServices::getInstance()->get( 'ParsoidParserFactory' )->create();
+		$parserOutput = $parserFactory->parse( $wikitext, $title, $parserOptions );
+
+		// $parserOutput->getText() will strip off the body tag, but we want to retain here.
+		// So we'll call ->getRawText() here and modify the HTML by ourselves.
+		preg_match( "#<body[^>]*>(.*?)</body>#", $parserOutput->getRawText(), $html );
+
+		return $html[0];
+	}
+
+	/**
+	 * @param string $html
+	 * @param Title $title
+	 *
+	 * @return string The converted HTML to Wikitext
+	 */
+	private static function htmlToWikitext( string $html, Title $title ) {
+		if ( self::isParsoidConfigured() ) {
+			return self::parsoid( 'html', 'wikitext', $html, $title );
+		} else {
+			return self::parser( 'html', 'wikitext', $html, $title );
 		}
 	}
 
@@ -88,18 +117,19 @@ abstract class Utils {
 	 * @param Language|null $lang Language to use for truncation.  Defaults to $wgLang
 	 * @return string plaintext
 	 */
-	public static function htmlToPlaintext( $html, $truncateLength = null, Language $lang = null ) {
+	public static function htmlToPlaintext( $html, ?int $truncateLength = null, Language $lang = null ) {
 		/** @var Language $wgLang */
 		global $wgLang;
 
 		$plain = trim( Sanitizer::stripAllTags( $html ) );
 
+		// Fallback to some large-ish value for truncation.
 		if ( $truncateLength === null ) {
-			return $plain;
-		} else {
-			$lang = $lang ?: $wgLang;
-			return $lang->truncateForVisual( $plain, $truncateLength );
+			$truncateLength = 10000;
 		}
+
+		$lang = $lang ?: $wgLang;
+		return $lang->truncateForVisual( $plain, $truncateLength );
 	}
 
 	/**
@@ -300,7 +330,13 @@ abstract class Utils {
 	private static function makeVRSObject() {
 		global $wgVirtualRestConfig, $wgFlowParsoidURL, $wgFlowParsoidPrefix,
 			$wgFlowParsoidTimeout, $wgFlowParsoidForwardCookies,
-			$wgFlowParsoidHTTPProxy;
+			$wgFlowParsoidHTTPProxy, $wgServer, $wgDBname, $wgRestPath;
+
+		if ( defined( 'MW_PHPUNIT_TEST' ) ) {
+			// HACK: We can't use parsoid through the web API in PHPUnit tests.
+			// This will go away when we switch to calling Parsoid directly as a PHP class.
+			throw new NoParserException( 'Parsoid disabled for PHPUnit' );
+		}
 
 		// the params array to create the service object with
 		$params = [];
@@ -321,16 +357,26 @@ abstract class Utils {
 			$params = $vrs['modules']['parsoid'];
 			$params['restbaseCompat'] = true;
 		} else {
-			// no global modules defined, fall back to old defaults
-			if ( !$wgFlowParsoidURL ) {
-				throw new NoParserException( 'Flow Parsoid configuration is unavailable', 'process-wikitext' );
+			// No global VRS modules defined, try to auto-detect
+			$restURL = $wgFlowParsoidURL;
+
+			if ( ExtensionRegistry::getInstance()->isLoaded( 'Parsoid' ) ) {
+				// The parsoid extension exposes the expected endpoints
+				$restURL = "$wgServer$wgRestPath/";
 			}
+
+			if ( !$restURL ) {
+				// We don't know where to find the Parsoid API.
+				throw new NoParserException( 'Parsoid not found, set $wgFlowParsoidURL or enable the Parsoid extension' );
+			}
+
 			$params = [
-				'URL' => $wgFlowParsoidURL,
-				'prefix' => $wgFlowParsoidPrefix,
+				'url' => $restURL,
+				'prefix' => $wgFlowParsoidPrefix ?: $wgDBname,
 				'timeout' => $wgFlowParsoidTimeout,
 				'HTTPProxy' => $wgFlowParsoidHTTPProxy,
-				'forwardCookies' => $wgFlowParsoidForwardCookies
+				'forwardCookies' => $wgFlowParsoidForwardCookies,
+				'restbaseCompat' => true,
 			];
 		}
 		// merge the global and service-specific params

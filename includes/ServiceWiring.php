@@ -11,6 +11,7 @@ use Flow\RevisionActionPermissions;
 use Flow\TemplateHelper;
 use MediaWiki\Logger\LoggerFactory;
 use MediaWiki\MediaWikiServices;
+use MediaWiki\Extension\StructuredDiscussions\Parser\Parsoid\ParsoidParserFactory;
 use Psr\Log\LoggerInterface;
 
 /**
@@ -113,4 +114,15 @@ return [
 			return RequestContext::getMain()->getUser();
 		}
 	},
+
+	'ParsoidParserFactory' => static function ( MediaWikiServices $services ): ParsoidParserFactory {
+		return new ParsoidParserFactory(
+			$services->getParsoidSiteConfig(),
+			$services->getParsoidDataAccess(),
+			$services->getParsoidPageConfigFactory(),
+			$services->getLanguageConverterFactory(),
+			$services->getParserFactory()
+		);
+	},
+
 ];
